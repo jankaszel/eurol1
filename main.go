@@ -1,120 +1,101 @@
 package main
 
 import (
-	"bufio"
+	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
 	"math"
 	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 )
 
 // Batches states how many batches we do process in parallel
-const Batches = 4
+const Batches = 8
 
-// <https://stackoverflow.com/a/18479916>
-func readLines(path string) ([]string, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-
-	var lines []string
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-	return lines, scanner.Err()
+type Alignment struct {
+	Speaker   SpeakerMeta `json:"speaker"`
+	Sentences []Sentence  `json:"sentences"`
 }
 
-func readSources(path string) ([][]string, error) {
-	files, err := ioutil.ReadDir(path)
-	if err != nil {
-		return nil, err
-	}
-
-	sources := make([][]string, len(files))
-	for i, f := range files {
-		if f.IsDir() {
-			continue
-		}
-
-		lines, err := readLines(filepath.Join(path, f.Name()))
-		if err != nil {
-			return nil, err
-		}
-		sources[i] = lines
-	}
-	return sources, nil
+type Sentence struct {
+	Language string `json:"language"`
+	Sentence string `json:"sentence"`
 }
 
-func findSentences(wg *sync.WaitGroup, id int, sentences []string, sources [][]string, offset int) {
-	defer wg.Done()
-
-	for i, sentence := range sentences {
-		found := false
-
-		// some aligned sentences may start with spaces, protected whitespaces (U+00A0), and periods
-		sentence = strings.Trim(sentence, "  .")
-
-		for _, sourceFile := range sources {
-			for _, sourceSentence := range sourceFile {
-				if strings.Contains(sourceSentence, sentence) {
-					found = true
-				}
-			}
-		}
-
-		if !found {
-			log.Printf("🚨 ️Could not find sentence of line %d\nSentence: %s\nPrefix runes: %U\nSuffix runes: %U\n\n", offset+i, sentence, []rune(sentence[:8]), []rune(sentence[(len(sentence)-8):]))
-		}
-
-		if i%1000 == 0 && i > 0 {
-			log.Printf("Worker %d worked %d sentences.\n", id, i)
-		}
+func min(a int, b int) int {
+	if a < b {
+		return a
 	}
-
-	log.Printf("🏁 Worker %d finished.\n", id)
+	return b
 }
 
 func main() {
-	if len(os.Args) < 4 {
-		fmt.Println("Usage: $ eurol1 <aligned-l1> <aligned-l2> <source-l1>")
+	if len(os.Args) < 6 {
+		fmt.Println("Usage: $ eurol1 <aligned-l1> <aligned-l2> <source-l1> out.json")
 		os.Exit(0)
 	}
 
-	aligned, err := readLines(os.Args[1])
+	l1, err := readLines(os.Args[1])
 	if err != nil {
 		panic(err)
 	}
-	log.Println("Aligned files read.")
-
+	l2, err := readLines(os.Args[2])
+	if err != nil {
+		panic(err)
+	}
 	sources, err := readSources(os.Args[3])
 	if err != nil {
 		panic(err)
 	}
-	log.Println("Source files read.")
+	outfile := os.Args[4]
 
-	batchSize := int(math.Ceil(float64(len(aligned)) / float64(Batches)))
-	log.Printf("Input (aligned sentences): %d\n", len(aligned))
+	log.Println("Input files read.")
+
+	batchSize := int(math.Ceil(float64(len(l1)) / float64(Batches)))
+	log.Printf("Input (aligned sentences): %d\n", len(l1))
 	log.Printf("Batch size: %d\n", batchSize)
 
 	var wg sync.WaitGroup
 	wg.Add(Batches)
 
-	for i := 0; i < Batches; i++ {
-		start := i * batchSize
-		end := start + batchSize - 1
-		batch := aligned[start:end]
+	alignments := make(chan Alignment, len(l1))
+	missing := make(chan string, len(l1))
 
-		log.Printf("Starting batch %d (%d to %d)\n", i, start, end)
-		go findSentences(&wg, i, batch, sources, start)
-	}
+	go func() {
+		for i := 0; i < Batches; i++ {
+			start := i * batchSize
+			end := min(start+batchSize-1, len(l1))
+			batch := l1[start:end]
+
+			log.Printf("Starting batch %d (%d to %d)\n", i, start, end)
+			go findSentences(&wg, i, alignments, missing, batch, l2, sources, start)
+		}
+	}()
 
 	wg.Wait()
+
+	close(alignments)
+	close(missing)
+
+	log.Printf("%d sentences were missing in total.\n", len(missing))
+	log.Printf("Writing files output...\n")
+
+	var as []Alignment
+	for a := range alignments {
+		as = append(as, a)
+	}
+	d, _ := json.Marshal(as)
+	_ = ioutil.WriteFile(outfile, d, 0644)
+
+	var ms []string
+	for m := range missing {
+		if m != "" {
+			ms = append(ms, m)
+		}
+	}
+	d, _ = json.Marshal(ms)
+	_ = ioutil.WriteFile("missing.json", d, 0644)
+
 	log.Println("Done.")
 }

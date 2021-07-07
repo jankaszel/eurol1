@@ -22,5 +22,5 @@ txt/
 Now, run eurol1:
 
 ```bash
-$ eurol1 ./europarl-v7.es-en.es ./europarl-v7.es-en.en ./txt/es ES > es-en.filtered.json
+$ eurol1 ./europarl-v7.es-en.es ./europarl-v7.es-en.en ./txt/es es-en.filtered.json
 ```
